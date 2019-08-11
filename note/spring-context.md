@@ -138,6 +138,8 @@
 # 开头
 
 入口方法在BeanDefinitionParserDelegate.parseCustomElement：
+也就是解析非beans namespace标签的时候，会解析到不同的NamespaceHandler，走了这里来，比如,annotation-config标签，component-scan标签。
+
 
 ```java
 return handler.parse(ele, new ParserContext(this.readerContext, this, containingBd));
@@ -198,19 +200,29 @@ public BeanDefinition parse(Element element, ParserContext parserContext) {
 ## BeanPostProcessor注册
 
 AnnotationConfigUtils.registerAnnotationConfigProcessors源码:
+registerAnnotationConfigProcessors()方法会添加一些spring内部的BeanDefination到register里面，也就是beanfactory里面去
+如：org.springframework.context.annotation.internalConfigurationBeanNameGenerator，
+    org.springframework.context.annotation.internalRequiredAnnotationProcessor
+    org.springframework.context.annotation.internalCommonAnnotationProcessor
+    等，可见AnnotationConfigUtils的常量。
+    执行后的结果只是添加了6个internal 的BeanPostProcessors到register中去。可以看到下面的beanDefs只会添加6个成员。
 
 ```java
 //第一个参数其实就是DefaultListableBeanFactory,第二个参数为null
+// 这些类的具体方法执行是在AbstractApplicationContext.refresh()中执行，此处只是注册
+// 也就是loadBeanDefination的时候，xml中的bean直接load出了BeanDefination,注解的bean，加载xml的时候，只是加载了会处理annotation的标签，在标签的解析中，会注册对注解的解析后处理类，在refesh的时候，invokeBeanFactoryPostProcessors()方法调用对注解的解析。
 public static Set<BeanDefinitionHolder> registerAnnotationConfigProcessors(
         BeanDefinitionRegistry registry, Object source) {
     //将registery强转为DefaultListableBeanFactory类型
     DefaultListableBeanFactory beanFactory = unwrapDefaultListableBeanFactory(registry);
     if (beanFactory != null) {
         if (!(beanFactory.getDependencyComparator() instanceof AnnotationAwareOrderComparator)) {
+            // 加载bean的顺序
             beanFactory.setDependencyComparator(AnnotationAwareOrderComparator.INSTANCE);
         }
         if (!(beanFactory.getAutowireCandidateResolver() instanceof 
             ContextAnnotationAutowireCandidateResolver)) {
+            // 判断依赖项是不是可以注入
             beanFactory.setAutowireCandidateResolver(new ContextAnnotationAutowireCandidateResolver());
         }
     }
@@ -218,6 +230,7 @@ public static Set<BeanDefinitionHolder> registerAnnotationConfigProcessors(
     Set<BeanDefinitionHolder> beanDefs = new LinkedHashSet<BeanDefinitionHolder>(4);
 
     if (!registry.containsBeanDefinition(CONFIGURATION_ANNOTATION_PROCESSOR_BEAN_NAME)) {
+        // 处理@Configuration的后处理类，核心方法是processConfigBeanDefinitions()
         RootBeanDefinition def = new RootBeanDefinition(ConfigurationClassPostProcessor.class);
         def.setSource(source);
         beanDefs.add(registerPostProcessor(registry, def,CONFIGURATION_ANNOTATION_PROCESSOR_BEAN_NAME));
@@ -279,6 +292,13 @@ public static Set<BeanDefinitionHolder> registerAnnotationConfigProcessors(
 ### ContextAnnotationAutowireCandidateResolver
 
 此类用以决定一个bean是否可以当作一个依赖的候选者。其类图:
+核心方法是:
+default boolean isAutowireCandidate(BeanDefinitionHolder bdHolder, DependencyDescriptor descriptor) {
+		return bdHolder.getBeanDefinition().isAutowireCandidate();
+	}
+SimpleAutowireCandidateResolver，只用BeanDefination里面的isAutowireCandidate(),不用descriptor，与default实现相同。
+这里可以看到继承了GenericTypeAwareAutowireCandidateResolver，作依赖判断时的类型判断
+这里可以看到继承了QualifierAnnotationAutowireCandidateResolver，所以@Qualifier注解会起作用
 
 ![ContextAnnotationAutowireCandidateResolver类图](images/ContextAnnotationAutowireCandidateResolver.jpg)
 
@@ -308,6 +328,7 @@ private static final boolean jsr250Present =
 ```
 
 此注解就在rt.jar下，所以默认情况下都是开启JSR-250支持的，所以我们就可以使用喜闻乐见的@Resource注解了。其类图:
+这里除了@Resource 以外还有@WebServiceRef @EJB 支持，可见方法 private InjectionMetadata buildResourceMetadata(final Class<?> clazz) {}
 
 ![CommonAnnotationBeanPostProcessor类图](images/CommonAnnotationBeanPostProcessor.jpg)
 
@@ -340,7 +361,35 @@ rt.jar下面并没有JPA的包，所以此Processor默认是没有被注册的�
 
 ## 逻辑关系整理
 
-普通的bean元素(XML)其实都有一个BeanDefinition对象与之对应，但是对于context开头的这种的特殊的元素，它所对应的一般不再是普通意义上的BeanDefinition，而是配合起来一起完成某种功能的组件(比如各种BeanPostProcessor)。这种组件Spring抽象成为ComponentDefinition接口，组件的集合表示成为CompositeComponentDefinition，类图:
+普通的bean元素(XML)其实都有一个BeanDefinition对象与之对应，但是对于context开头的这种的特殊的元素，它所对应的一般不再是普通意义上的BeanDefinition，而是配合起来一起完成某种功能的组件(比如各种BeanPostProcessor)。**这种组件Spring抽象成为ComponentDefinition接**口，组件的集合表示成为CompositeComponentDefinition，类图:
+```java
+public interface ComponentDefinition extends BeanMetadataElement 
+```
+```java
+public BeanDefinition parse(Element element, ParserContext parserContext) {
+		Object source = parserContext.extractSource(element);
+
+		// Obtain bean definitions for all relevant BeanPostProcessors.
+		// 注册的postprocessor
+		Set<BeanDefinitionHolder> processorDefinitions =
+				AnnotationConfigUtils.registerAnnotationConfigProcessors(parserContext.getRegistry(), source);
+
+		// Register component for the surrounding <context:annotation-config> element.
+		// 这个就是最后的  ComponentDefinition ,与components间通过 source 关联起来。
+		CompositeComponentDefinition compDefinition = new CompositeComponentDefinition(element.getTagName(), source);
+		parserContext.pushContainingComponent(compDefinition);
+
+		// Nest the concrete beans in the surrounding component.
+		for (BeanDefinitionHolder processorDefinition : processorDefinitions) {
+			parserContext.registerComponent(new BeanComponentDefinition(processorDefinition));
+		}
+
+		// Finally register the composite component.
+		parserContext.popAndRegisterContainingComponent();
+
+		return null;
+	}
+```
 
 ![CompositeComponentDefinition类图](images/CompositeComponentDefinition.jpg)
 
@@ -350,6 +399,9 @@ rt.jar下面并没有JPA的包，所以此Processor默认是没有被注册的�
 
 不过这个数据结构貌似也没什么用，因为调用的是XmlBeanDefinitionReader中的eventListener的componentRegistered方法，然而这里的eventListener是EmptyReaderEventListener，也就是空实现。
 
+
+
+## 上面注册的BeanPostProcessor处理过程
 ## 运行
 
 ### ConfigurationClassPostProcessor
@@ -359,7 +411,7 @@ rt.jar下面并没有JPA的包，所以此Processor默认是没有被注册的�
 ```java
 invokeBeanFactoryPostProcessors(beanFactory);
 ```
-
+这些postProcessrs按照 PriorityOrdered.class, Ordered.class, other的顺序加载
 注意，因为ConfigurationClassPostProcessor实现自BeanDefinitionRegistryPostProcessor接口，所以在此处会首先调用其postProcessBeanDefinitionRegistry方法，再调用其postProcessBeanFactory方法。
 
 #### postProcessBeanDefinitionRegistry
@@ -444,8 +496,26 @@ public static void main(String[] args) {
 用于为实现了EnhancedConfiguration接口的类设置BeanFactory对象，所有的@Configuration Cglib子类均实现了此接口，为什么要这么做不太明白。
 
 ##### 类解析
+总的而言，这一步还是把解析的信息放入了configclass里面
 
-这里便是对标注了@Configuration注解的类及进行解析，通过调用ConfigurationClassPostProcessor的processConfigBeanDefinitions方法来实现，具体怎么解析就不详细说明了。
+   a. 这里便是对标注了@Configuration注解的类及进行解析，通过调用ConfigurationClassPostProcessor的processConfigBeanDefinitions方法来实现，具体怎么解析就不详细说明了。
+    会依次解析类上的@PropertySource -> 加载文件对应的property，会把文件位置作为key。形成PropertySource对象，文件kv成为它的properties属性。这个对象 envrioment的属性propertysources里面 ，文件名放入propertynames里面。
+                    ConfigurationClassParser.addPropertySource方法。到这里还没有bean。属性也没进入beanDefination。
+                  
+                  @ComponentScans，@ComponentScan注解
+                   @Import 
+                   @ImportResource
+                   @Bean        -> 这个方法会获取bean的meatadata里面方法中有@Bean注解的方法。封装成BeanMethod加入configclass的属性beanMethods里面。bean的名字是方法名
+                   interfaces  同上，对内部interface也是封装成BeanMethod放入到
+   b.对configclass加载beandefination
+    this.reader.loadBeanDefinitions(configClasses); // ConfigurationClassPostProcessor.processConfigBeanDefinitions()
+    会依次加载 configclassbean和beanMethod对应的bean。不过debug发现， configclassbean给跳过了。
+    		@Bean对应生成了 ConfigurationClassBeanDefinition这样的BeanDefination。
+    		    ConfigurationClassBeanDefinition beanDef = new ConfigurationClassBeanDefinition(configClass, metadata);
+                beanDef.setResource(configClass.getResource());
+                beanDef.setSource(this.sourceExtractor.extractSource(metadata, configClass.getResource()));
+            会获取@Bean里面的各个注解，写入BeanDefination里面，最后，对它向上转型，转成BeanDefination
+               
 
 ###### bean名字生成策略
 
@@ -478,6 +548,13 @@ if (registry instanceof SingletonBeanRegistry) {
 #### postProcessBeanFactory
 
 此方法调用了enhanceConfigurationClasses，其实就是将@Configuration的beanClass转换为CGLIB代理子类。简略版的源码:
+用了 cglib的Enhancer，对类代理，然后beandefination里面的class会换成代理后的class。
+增强的逻辑在类ConfigurationClassEnhancer里面，主要是添加了如下callback
+            new BeanMethodInterceptor(),
+			new BeanFactoryAwareMethodInterceptor(),
+			NoOp.INSTANCE
+
+PostProcessorRegistrationDelegate.invokeBeanFactoryPostProcessors()方法调用下面代码。
 
 ```java
 public void enhanceConfigurationClasses(ConfigurableListableBeanFactory beanFactory) {
@@ -559,6 +636,24 @@ private static final Callback[] CALLBACKS = new Callback[] {
   ```
 
   Spring正是通过生成CGLIB子类的方式来提供Scope的语义。更确切的说，是上面源码里面的BeanMethodInterceptor。
+  处理完ConfigurationClassPostProcessor,对于AutowiredAnnotationBeanPostProcessor这个后处理器，实现了Priority，但是不是BeanDefinitionRegistryPostProcessor的子类，不进行处理。
+  // Invoke factory processors registered as beans in the context.
+  因为上面还在调用的函数invokeBeanFactoryPostProcessors(beanFactory);里面，所以只有BeanDefinitionRegistryPostProcessor这样的后处理器才会执行
+  0 = "org.springframework.context.annotation.internalAutowiredAnnotationProcessor"
+  1 = "org.springframework.context.annotation.internalRequiredAnnotationProcessor"
+  2 = "org.springframework.context.annotation.internalCommonAnnotationProcessor"
+  这三个在下面的函数中去执行注册，并没有做具体业务逻辑。真的执行逻辑要到finishBeanFactoryInitialization()方法中调用beanFactory.preInstantiateSingletons()来才会调到BeanProcessor
+  具体来说是在AbstractAutowireCapableBeanFactory.applyMergedBeanDefinitionPostProcessors()这个方法中调用Autowaire,Required,CommonAnnotation等注解解析
+  // Register bean processors that intercept bean creation.
+     AbstractApplicationContext.registerBeanPostProcessors(beanFactory);
+  
+  // 同理在populatebean()时，它们的 postProcessAfterInstantiation()方法中没有什么操作，
+  // 到AbstractApplicationContext.applyPropertyValues()方法时才注入属性
+     
+   //   
+  CommonAnnotationBeanPostProcessor.postProcessMergedBeanDefinition()  // 后处理执行到了
+  AutowiredAnnotationBeanPostProcessor.postProcessMergedBeanDefinition()同理
+        里面重要方法buildAutowiringMetadata（）会找出bean里面重要的有autowarie的元素，形成injectedelements放入metadata里面。注意的是autowaire可以设在属性上，也可以设在方法上，也可以在构造器上 
 
 - 实现EnhancedConfiguration接口
 
@@ -1178,6 +1273,7 @@ protected ClassPathBeanDefinitionScanner configureScanner(ParserContext parserCo
 ### use-default-filters
 
 component-scan注解会默认扫描喜闻乐见的@Component、@Repository、@Service和@Controller四大金刚。如果此属性设为false，那么就不会扫描这几个属性。
+在ClassPathScanningCandidateComponentProvider.isCandidateComponent()方法中实现了。可以在方法registerDefaultFilters()里面看到默认支持的是Component，ManagedBean
 
 ### 扫描器:创建 & 初始化
 
@@ -1263,6 +1359,64 @@ protected Set<BeanDefinitionHolder> doScan(String... basePackages) {
     }
     return beanDefinitions;
 }
+```
+
+```java
+private Set<BeanDefinition> scanCandidateComponents(String basePackage) {
+		Set<BeanDefinition> candidates = new LinkedHashSet<>();
+		try {
+			String packageSearchPath = ResourcePatternResolver.CLASSPATH_ALL_URL_PREFIX +
+					resolveBasePackage(basePackage) + '/' + this.resourcePattern;
+			Resource[] resources = getResourcePatternResolver().getResources(packageSearchPath);
+			boolean traceEnabled = logger.isTraceEnabled();
+			boolean debugEnabled = logger.isDebugEnabled();
+			for (Resource resource : resources) {
+				if (traceEnabled) {
+					logger.trace("Scanning " + resource);
+				}
+				if (resource.isReadable()) {
+					try {
+						MetadataReader metadataReader = getMetadataReaderFactory().getMetadataReader(resource);
+						if (isCandidateComponent(metadataReader)) {
+						    // 这里产生Beandefination
+							ScannedGenericBeanDefinition sbd = new ScannedGenericBeanDefinition(metadataReader);
+							sbd.setResource(resource);
+							sbd.setSource(resource);
+							if (isCandidateComponent(sbd)) {
+								if (debugEnabled) {
+									logger.debug("Identified candidate component class: " + resource);
+								}
+								candidates.add(sbd);
+							}
+							else {
+								if (debugEnabled) {
+									logger.debug("Ignored because not a concrete top-level class: " + resource);
+								}
+							}
+						}
+						else {
+							if (traceEnabled) {
+								logger.trace("Ignored because not matching any filter: " + resource);
+							}
+						}
+					}
+					catch (Throwable ex) {
+						throw new BeanDefinitionStoreException(
+								"Failed to read candidate component class: " + resource, ex);
+					}
+				}
+				else {
+					if (traceEnabled) {
+						logger.trace("Ignored because not readable: " + resource);
+					}
+				}
+			}
+		}
+		catch (IOException ex) {
+			throw new BeanDefinitionStoreException("I/O failure during classpath scanning", ex);
+		}
+		return candidates;
+	}
 ```
 
 ### 逐包扫描/BeanDefinition解析
@@ -1615,7 +1769,7 @@ public static void main(String[] args) {
 ## 解析
 
 解析的原理是将此配置相关的信息保存到BeanDefinition中，更准确的说是一个GenericBeanDefinition。解析的源码: 
-
+它的逻辑都是在后处理才会调用，也就是BeanDefination都有才会调用，所以不会出现先有它，还没BeanDef,而无法override的问题
 AbstractPropertyLoadingBeanDefinitionParser.doParse:
 
 ```java
@@ -1720,6 +1874,7 @@ public void setProperties(Properties properties) {
 ## 运行
 
 入口当然是BeanFactoryPostProcessor.postProcessBeanFactory(PropertyResourceConfigurer):
+PropertyResourceConfigurer.postProcessBeanFactory()
 
 ```java
 @Override

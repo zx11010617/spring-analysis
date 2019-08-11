@@ -433,8 +433,11 @@ public void refresh() throws BeansException, IllegalStateException {
     synchronized (this.startupShutdownMonitor) {
         // Prepare this context for refreshing.
         prepareRefresh();
+        
         // Tell the subclass to refresh the internal bean factory.
+         // 这一步里面加载beandefination，加载xml其它标签
         ConfigurableListableBeanFactory beanFactory = obtainFreshBeanFactory();
+        
         // Prepare the bean factory for use in this context.
         prepareBeanFactory(beanFactory);
         try {
@@ -537,6 +540,7 @@ protected final void refreshBeanFactory() throws BeansException {
     DefaultListableBeanFactory beanFactory = createBeanFactory();
     beanFactory.setSerializationId(getId());
     customizeBeanFactory(beanFactory);
+    // 核心加载beandefination的方法
     loadBeanDefinitions(beanFactory);
     synchronized (this.beanFactoryMonitor) {
         this.beanFactory = beanFactory;
@@ -585,6 +589,8 @@ protected void loadBeanDefinitions(DefaultListableBeanFactory beanFactory) {
     // then proceed with actually loading the bean definitions.
     //默认空实现
     initBeanDefinitionReader(beanDefinitionReader);
+    
+    // 核心方法
     loadBeanDefinitions(beanDefinitionReader);
 }
 ```
