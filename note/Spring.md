@@ -378,6 +378,7 @@ private PropertyPlaceholderHelper createPlaceholderHelper(boolean ignoreUnresolv
 ```
 
 doResolvePlaceholders：
+这个方法的目地是把configlocation里面的${}进行解析，替换成对应的实际属性值
 
 ```java
 private String doResolvePlaceholders(String text, PropertyPlaceholderHelper helper) {
@@ -435,28 +436,133 @@ public void refresh() throws BeansException, IllegalStateException {
         prepareRefresh();
         
         // Tell the subclass to refresh the internal bean factory.
-         // 这一步里面加载beandefination，加载xml其它标签
+        // 这一步里面加载beandefination，加载xml其它标签,完成这一步后，beanfactory有了，定义的bean都注册了beandefination,
+        // 默认的注解的后处理器也注册了
         ConfigurableListableBeanFactory beanFactory = obtainFreshBeanFactory();
         
         // Prepare the bean factory for use in this context.
+        // 注册一些   BeanPostProcessor  后处理器，如  ApplicationContextAwareProcessor ApplicationListenerDetector
         prepareBeanFactory(beanFactory);
         try {
             // Allows post-processing of the bean factory in context subclasses.
+            // 实际上是空实现
             postProcessBeanFactory(beanFactory);
+            
             // Invoke factory processors registered as beans in the context.
+            // BeanFactoryPostProcessor后处理器开始处理，很重要的一步。此时只有BeanDefination，还没有实例，先从BeanDefination开始建实例。
+            // 1.第一步是处理 BeanDefinitionRegistryPostProcessor.class，且实现了PriorityOrdered的，这种PostProcessor，只有一个 ，就是ConfigurationClassPostProcessor
+            //   如org.springframework.context.annotation.internalConfigurationAnnotationProcessor这个id,从这个id调用beanfactory的getBean方法，建出实例
+            //   0 = {ApplicationContextAwareProcessor@5270} 
+            //   1 = {ApplicationListenerDetector@5271}
+            //   这一步里面，AbstractBeanFactory的postprocessor属性里面只有这两个postprocessor是已经实例化过的，也只有这两个。会先调用
+            //   MergedBeanDefinitionPostProcessor 这种类型的PostProcessor，调用其postProcessMergedBeanDefinition()方法。
+            //   后面实例化出来后，先populate属性，再先后调用postprocessor的before方法，如果是InitializingBean 会调其afterPropertiesSet()的init方法，
+            //   再调bean的init方法，再调postprocessor的post方法  
+            //   然后就调用invokeBeanDefinitionRegistryPostProcessors(currentRegistryProcessors, registry);
+            //   会调用刚才实例化出来的ConfigurationClassPostProcessor的 作为BeanDefinitionRegistryPostProcessor时的  postProcessBeanDefinitionRegistry()方法，对所有的bean进行责任链调用
+            //   ConfigurationClassPostProcessor.postProcessBeanDefinitionRegistry()是一个很大的方法，见spring-context.md
+            //   这一步只会处理@Component和@Configuration的Bean，可能会添加一些BeanDefination(ComponentScan标签作用),或者给原BeanDefination添加一些属性进去
+            
+            // 2.同样处理BeanDefinitionRegistryPostProcessor,按照先实现了Ordered接口的，再是普通的。实际debug发现，总共只有一个实现了BeanDefinitionRegistryPostProcessor的，所以第2步实际是空的
+            // 3.对Configuration的Bean进行增强  ConfigurationClassPostProcessor.enhanceConfigurationClasses()方法，增强逻辑在ConfigurationClassEnhancer.CALLBACKS里面
+            //   会修改beandefination中对应的beanclass
+            // 4. 找出所有的 BeanFactoryPostProcessor
+            //    里面包括前面的ConfigurationClassPostProcessor,不过会跳过
+            // 实际上会用到的有一个 PlaceholderConfigurerSupport，会对beandef里面的元素，如classname,parentname等用访问者模式去替换字符串，以及alias进行替换
             invokeBeanFactoryPostProcessors(beanFactory);
+            
             // Register bean processors that intercept bean creation.
+            /* bean的后处理器，与上一步不同
+                0 = "org.springframework.aop.config.internalAutoProxyCreator"
+                1 = "org.springframework.context.annotation.internalAutowiredAnnotationProcessor"
+                2 = "org.springframework.context.annotation.internalRequiredAnnotationProcessor"
+                3 = "org.springframework.context.annotation.internalCommonAnnotationProcessor"
+                这一步的目的只是添加和注册，还有对BeanPostProcessor排序
+            */
             registerBeanPostProcessors(beanFactory);
+            
             // Initialize message source for this context.
+            // 采用默认的，来注册 messageSource -> new DelegatingMessageSource();
             initMessageSource();
+            
             // Initialize event multicaster for this context.
+            // 采用默认的，来注册 this.applicationEventMulticaster = new SimpleApplicationEventMulticaster(beanFactory);
+            // 
             initApplicationEventMulticaster();
+            
             // Initialize other special beans in specific context subclasses.
+            // 空实现
             onRefresh();
+            
             // Check for listener beans and register them.
+            // 注册listener,值得注意的是mybatis的sqlsessionfacotry是用FactoryBean
+            // SqlSessionFactoryBean implements FactoryBean<SqlSessionFactory>, InitializingBean, ApplicationListener<ApplicationEvent>
+            // 所以sqlsessionfactory会注册进来
             registerListeners();
+            
             // Instantiate all remaining (non-lazy-init) singletons.
+            // 主体ioc逻辑，aop也发生在这一步
+            /**
+             * 会先找LoadTimeWeaverAware，
+             * 最主要的逻辑在最后一行， Instantiate all remaining (non-lazy-init) singletons. 只会初始化singleton的，非abstractDefination的bean
+             * beanFactory.preInstantiateSingletons();
+             * AbstractAutowireCapableBeanFactory.applyBeanPostProcessorsBeforeInstantiation()这个方法上，会对bean采用所有的beanpostProcessor进行调用，
+             * 也就是AbstractAutowireCapableBeanFactory 中的这几行：
+             *          // Give BeanPostProcessors a chance to return a proxy instead of the target bean instance.
+             *			Object bean = resolveBeforeInstantiation(beanName, mbdToUse);
+             * 其中，AbstractAutoProxyCreator会创立代理,调用postProcessBeforeInstantiation()方法。
+             * 如果走了proxy，有实例返回，就不会再走后面spring建实例的分支了。
+             * 
+             * 实际上其它的postProcessor大多是null返回，相当于空实现。
+             * spring建实例:
+             * 找到构造器，
+             *  再在protected Object doCreateBean(final String beanName, final RootBeanDefinition mbd, final @Nullable Object[] args)中执行 applyMergedBeanDefinitionPostProcessors(mbd, beanType, beanName); 对BeanProcessor里面的MergedBeanDefinitionPostProcessor调用
+             *      CommonAnnotationBeanPostProcessor就是这样的实例，会调用postProcessMergedBeanDefinition()方法
+             *      @Override
+                    public void postProcessMergedBeanDefinition(RootBeanDefinition beanDefinition, Class<?> beanType, String beanName) {
+                        super.postProcessMergedBeanDefinition(beanDefinition, beanType, beanName);
+                        InjectionMetadata metadata = findResourceMetadata(beanName, beanType, null);
+                        metadata.checkConfigMembers(beanDefinition);
+                    }
+             *      super.postProcessMergedBeanDefinition(beanDefinition, beanType, beanName); 
+             *      此处根据传入的beanclass,解析metadata
+             *      LifecycleMetadata里面会保存new LifecycleMetadata(clazz, initMethods, destroyMethods);初始化方法，destroy方法，class。
+             *      是反射出class里面所有的方法，找出ostConstruct标记的作为initmethods，Predestroy标记的作为destroymethods,从而构造出了lifecycleMetadata,
+             *      
+             *      InjectionMetadata metadata = findResourceMetadata(beanName, beanType, null);
+             *      InjectionMetadata buildResourceMetadata(final Class<?> clazz);这个方法会建立class的resourceMetadata。
+             *      遍历class的Field，找出里面有 @WebServiceRef @EJB @Resource等注解的属性和方法，封装成Element，封装成
+             *      new InjectionMetadata(clazz, elements);
+             *      这里就可以看到，@Bean的方法在这以前（ConfigurationBeanDefinationPostProcesssor那里）就处理成了Beandefination，@Resource的方法,属性现在处理成metadata
+             *      
+             *      接着 AutowiredAnnotationBeanPostProcessor，处理@Autowaired @Value
+             *      处理过程类似上面的，也是找到InjectionMetadata，
+             *      
+             *      接着，RequiredAnnotationBeanPostProcessor,处理??
+             *      
+             *      接着，ApplicationListenerDetector  在它自己的单例map singletonNames 里面加入当前bean 
+             *      
+             *      
+             *      再就是populate()了。
+             *      用这样的后处理器InstantiationAwareBeanPostProcessor来处理属性
+             *      调用 metadata.inject(bean, beanName, pvs);
+             *          里面会调用(InjectedElement)element.inject(target, beanName, pvs);
+             *          通过方法protected Object autowireResource(BeanFactory factory, LookupElement element, @Nullable String requestingBeanName)找到要注入的实例对象
+             *              里面会resolveDependency()，也就是说dependson的依赖是早就处理了，注入的依赖处理，现在才做校验
+                            这个处理dependency的步骤中，也会实例化bean
+             *      
+             *      
+             *      再就是调用bean的aware接口了,在方法initializeBean()中调用invokeAwareMethods(beanName, bean);
+                    populateBean(beanName, mbd, instanceWrapper);
+                    exposedObject = initializeBean(beanName, exposedObject, mbd);
+                    再调用applyBeanPostProcessorsBeforeInitialization
+                         InitializingBean的afterPropertiesSet()
+                         initmethod
+                         applyBeanPostProcessorsAfterInitialization
+             *      
+            */
             finishBeanFactoryInitialization(beanFactory);
+            
             // Last step: publish corresponding event.
             finishRefresh();
         } catch (BeansException ex) {
@@ -555,6 +661,8 @@ protected final void refreshBeanFactory() throws BeansException {
 ![BeanFactory继承体系](images/BeanFactory.jpg)
 
 #### BeanFactory定制
+
+AbstractAutowireCapableBeanFactory.ignoredDependencyInterfaces属性中存入了一些interface,如BeanNameAware,BeanFactoryAware, BeanClassLoaderAware
 
 AbstractRefreshableApplicationContext.customizeBeanFactory方法用于给子类提供一个自由配置的机会，默认实现:
 
@@ -723,7 +831,8 @@ public Resource[] getResources(String locationPattern) throws IOException {
 ```
 
 isPattern:
-
+也就是说里面是可以带*或者?的，比如配置路径为 classpath:anno/?.xml也是可以的，通过解析以后，是会去掉classpath的，那么一开始就去了classpath也是可以的
+也就是说可以写成xml/anno.xml这种也是可以的。
 ```java
 @Override
 public boolean isPattern(String path) {
@@ -797,7 +906,12 @@ protected Document doLoadDocument(InputSource inputSource, Resource resource) {
 
 documentLoader是一个DefaultDocumentLoader对象，此类是DocumentLoader接口的唯一实现。getEntityResolver方法返回ResourceEntityResolver，上面说过了。errorHandler是一个SimpleSaxErrorHandler对象。
 
-校验模型其实就是确定xml文件使用xsd方式还是dtd方式来校验，忘了的话左转度娘。Spring会通过读取xml文件的方式判断应该采用哪种。
+校验模型其实就是确定xml文件使用xsd方式还是dtd方式来校验，忘了的话左转度娘，
+plus:XSD(XML Schemas Definition) 
+     DTD(Documnet Type Definition)
+     一个XML Schema会定义：文档中出现的元素、文档中出现的属性、子元素、子元素的数量、子元素的顺序、元素是否为空、元素和属性的数据类型、元素或属性的默认 和固定值。
+     spring里面头文件里面就写了xsd，可以进去看到，都是对xml有哪些标签的定义。
+。Spring会通过读取xml文件的方式判断应该采用哪种。
 
 NamespaceAware默认false，因为默认配置了校验为true。
 
@@ -817,6 +931,7 @@ public Document loadDocument(InputSource inputSource, EntityResolver entityResol
 createDocumentBuilderFactory比较有意思:
 
 ```java
+/*
 protected DocumentBuilderFactory createDocumentBuilderFactory(int validationMode, boolean namespaceAware{
     DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
     factory.setNamespaceAware(namespaceAware);
@@ -832,7 +947,36 @@ protected DocumentBuilderFactory createDocumentBuilderFactory(int validationMode
         }
     }
     return factory;
-}
+    */
+    
+    // spring5变成新的写法了
+    protected DocumentBuilderFactory createDocumentBuilderFactory(int validationMode, boolean namespaceAware)
+    			throws ParserConfigurationException {
+    
+    		DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+    		factory.setNamespaceAware(namespaceAware);
+    
+    		if (validationMode != XmlValidationModeDetector.VALIDATION_NONE) {
+    			factory.setValidating(true);
+    			if (validationMode == XmlValidationModeDetector.VALIDATION_XSD) {
+    				// Enforce namespace aware for XSD...
+    				factory.setNamespaceAware(true);
+    				try {
+    					factory.setAttribute(SCHEMA_LANGUAGE_ATTRIBUTE, XSD_SCHEMA_LANGUAGE);
+    				}
+    				catch (IllegalArgumentException ex) {
+    					ParserConfigurationException pcex = new ParserConfigurationException(
+    							"Unable to validate using XSD: Your JAXP provider [" + factory +
+    							"] does not support XML Schema. Are you running on Java 1.4 with Apache Crimson? " +
+    							"Upgrade to Apache Xerces (or Java 1.5) for full XSD support.");
+    					pcex.initCause(ex);
+    					throw pcex;
+    				}
+    			}
+    		}
+    
+    		return factory;
+    	}
 ```
 
 ##### Bean解析
@@ -883,6 +1027,12 @@ XmlReaderContext的作用感觉就是这一堆参数的容器，糅合到一起�
 
 DefaultBeanDefinitionDocumentReader.registerBeanDefinitions:
 
+DefaultNamespaceHandlerResolver()这个构造器里面会调用
+        Assert.notNull(handlerMappingsLocation, "Handler mappings location must not be null");
+		this.classLoader = (classLoader != null ? classLoader : ClassUtils.getDefaultClassLoader());
+		this.handlerMappingsLocation = handlerMappingsLocation;
+其中handlerMappingsLocation是META-INF/spring.handler文件，从中找出了handlerMappingsLocation
+
 ```java
 @Override
 public void registerBeanDefinitions(Document doc, XmlReaderContext readerContext) {
@@ -899,7 +1049,7 @@ protected void doRegisterBeanDefinitions(Element root) {
     BeanDefinitionParserDelegate parent = this.delegate;
     this.delegate = createDelegate(getReaderContext(), root, parent);
     //默认的命名空间即
-    //http://www.springframework.org/schema/beans
+    //http://www.springframework.org/schema/beans,这个是写死在常量里面的
     if (this.delegate.isDefaultNamespace(root)) {
         //检查profile属性
         String profileSpec = root.getAttribute(PROFILE_ATTRIBUTE);
@@ -941,7 +1091,7 @@ xml(schema)的命名空间其实类似于java的报名，命名空间采用URL�
 xmlns属性就是xml规范定义的用来设置命名空间的。这样设置了之后其实里面的bean元素全名就相当于http://www.springframework.org/schema/beans:bean，可以有效的防止命名冲突。命名空间可以通过规范定义的org.w3c.dom.Node.getNamespaceURI方法获得。
 
 注意一下profile的检查, AbstractEnvironment.acceptsProfiles:
-
+可以先配好属性 spring.profiles.active,不然的话，就要配成profile名字是default，否则，就不是active的profile
 ```java
 @Override
 public boolean acceptsProfiles(String... profiles) {
@@ -959,7 +1109,7 @@ public boolean acceptsProfiles(String... profiles) {
 }
 ```
 
-原理很简单，注意从源码可以看出，**profile属性支持!取反**。
+原理很简单，注意从源码可以看出，**profile属性支持!取反**。也就是profile正常属性是表示取此profile，!属性值表示不取此profile。
 
 preProcessXml方法是个空实现，供子类去覆盖，**目的在于给子类一个把我们自定义的标签转为Spring标准标签的机会**, 想的真周到。
 
@@ -1110,7 +1260,7 @@ String id = ele.getAttribute(ID_ATTRIBUTE);
 String nameAttr = ele.getAttribute(NAME_ATTRIBUTE);
 List<String> aliases = new ArrayList<String>();
 if (StringUtils.hasLength(nameAttr)) {
-    //按,分隔
+    //按,; 分隔， 这个StringUtils可以多个分隔符切分
     String[] nameArr = StringUtils.tokenizeToStringArray
         (nameAttr, MULTI_VALUE_ATTRIBUTE_DELIMITERS);
     aliases.addAll(Arrays.asList(nameArr));
@@ -1124,6 +1274,7 @@ if (!StringUtils.hasText(beanName) && !aliases.isEmpty()) {
 if (containingBean == null) {
     //校验id是否已重复，如果重复直接抛异常
     //校验是通过内部一个HashSet完成的，出现过的id都会保存进此Set
+    // 里面有1个set usedNames，beanName和alias都会进里面进行校验
     checkNameUniqueness(beanName, aliases, ele);
 }
 ```
@@ -1211,6 +1362,8 @@ public static AbstractBeanDefinition createBeanDefinition(
 ```
 
 之后是解析bean的其它属性，其实就是读取其配置，调用相应的setter方法保存在BeanDefinition中:
+beanDefination里面有autowairemode默认的autowaire方式是byName
+而@Autowaire是byType的，两者不同
 
 ```java
 parseBeanDefinitionAttributes(ele, beanName, containingBean, bd);
@@ -1260,6 +1413,7 @@ AbstractBeanDefinition继承自BeanMetadataAttributeAccessor类，底层使用�
 lookup-method解析：
 
 此标签的作用在于当一个bean的某个方法被设置为lookup-method后，**每次调用此方法时，都会返回一个新的指定bean的对象**。用法示例:
+类似@Bean方法，但返回的对象是prototype的。
 
 ```xml
 <bean id="apple" class="cn.com.willchen.test.di.Apple" scope="prototype"/>
@@ -1396,7 +1550,7 @@ public void registerBeanDefinition(String beanName, BeanDefinition beanDefinitio
 }
 ```
 
-一个是Map，另一个是List，一目了然。registerAlias方法的实现在其父类SimpleAliasRegistry，就是把键值对放在了一个ConcurrentHashMap里。
+一个是Map，另一个是List，一目了然。registerAlias方法的实现在其父类SimpleAliasRegistry，就是把键值对放在了一个ConcurrentHashMap里。同alias标签的处理。
 
 ComponentRegistered事件触发:
 
@@ -1466,10 +1620,21 @@ http\://www.springframework.org/schema/cache=org.springframework.cache.config.Ca
 
 ##### init
 
-resolve中调用了其init方法，此方法用以向NamespaceHandler对象注册BeanDefinitionParser对象。**此接口用以解析顶层(beans下)的非默认命名空间元素，比如`<context:annotation-config />`**。
+resolve中调用了其init方法，此方法用以向NamespaceHandler对象注册BeanDefinitionParser对象，
+也就是不同的标签对应不同的解析器，注册到一个map中去如：component-scan这个key就对应了一个实现类的实例
+registerBeanDefinitionParser("component-scan", new ComponentScanBeanDefinitionParser());
+。**此接口用以解析顶层(beans下)的非默认命名空间元素，比如`<context:annotation-config />`**。
 
 所以这样逻辑就很容易理解了: **每种子标签的解析仍是策略模式的体现，init负责向父类NamespaceHandlerSupport注册不同的策略，由父类的NamespaceHandlerSupport.parse方法根据具体的子标签调用相应的策略完成解析的过程**。
 
+##  Tell the subclass to refresh the internal bean factory.
+  			ConfigurableListableBeanFactory beanFactory = obtainFreshBeanFactory(); // 这个方法至此结束分析。
+
+
+
+
+
+下面从refresh()方法中，调用AbstractApplicationContext.prepareBeanFactory()开始。
 此部分较为重要，所以重新开始大纲。 
 
 ##### BeanFactory数据结构
@@ -1493,7 +1658,7 @@ Object evaluate(String value, BeanExpressionContext evalContext)
 prepareBeanFactory将一个此对象放入BeanFactory:
 
 ```java
-beanFactory.setBeanExpressionResolver(new 						 			StandardBeanExpressionResolver(beanFactory.getBeanClassLoader()));
+beanFactory.setBeanExpressionResolver(new StandardBeanExpressionResolver(beanFactory.getBeanClassLoader()));
 ```
 
 StandardBeanExpressionResolver对象内部有一个关键的成员: SpelExpressionParser,其整个类图:
@@ -1513,6 +1678,7 @@ registerCustomEditors(PropertyEditorRegistry registry)
 实现也只有一个: ResourceEditorRegistrar。
 
 在编写xml配置时，我们设置的值都是字符串形式，所以在使用时肯定需要转为我们需要的类型，PropertyEditor接口正是定义了这么个东西。
+此处PropertyEditor返回的是Envrionment接口，也就是Envrionment接口有解析字符串property为指定类型的功能。
 
 prepareBeanFactory:
 
@@ -1545,6 +1711,7 @@ BeanFactory也暴露了registerCustomEditors方法用以添加自定义的转换
 在Spring中我们自己的bean可以通过实现EnvironmentAware等一系列Aware接口获取到Spring内部的一些对象。prepareBeanFactory:
 
 ```java
+// 这个processor注册后。自定义的ApplicationContextAware接口，就是通过这个processor的调用来调用的。
 beanFactory.addBeanPostProcessor(new ApplicationContextAwareProcessor(this));
 ```
 
@@ -1648,7 +1815,7 @@ void postProcessBeanFactory(ConfigurableListableBeanFactory beanFactory);
   <bean class="base.SimpleBeanFactoryPostProcessor" />
   ```
 
-注意此时尚未进行bean的初始化工作，初始化是在后面的finishBeanFactoryInitialization进行的，所以在BeanFactoryPostProcessor对象中获取bean会导致提前初始化。
+注意此时尚未进行bean的初始化工作，初始化是在后面的finishBeanFactoryInitialization进行的，**所以在BeanFactoryPostProcessor对象中获取bean会导致提前初始化**。
 
 此方法的关键源码:
 
@@ -1668,6 +1835,7 @@ getBeanFactoryPostProcessors获取的就是AbstractApplicationContext的成员be
 ### BeanPostProcessor注册
 
 此部分实质上是在BeanDefinitions中寻找BeanPostProcessor，之后调用BeanFactory.addBeanPostProcessor方法保存在一个List中，注意添加时仍然有优先级的概念，优先级高的在前面。
+这一步实质上实例化BeanPostProcessor到beanfactory中去。
 
 ### MessageSource
 
@@ -1882,6 +2050,7 @@ public void preInstantiateSingletons() throws BeansException {
     for (String beanName : beanNames) {
         RootBeanDefinition bd = getMergedLocalBeanDefinition(beanName);
         if (!bd.isAbstract() && bd.isSingleton() && !bd.isLazyInit()) {
+            // 这里就是factoryBean和普通bean的区别的分支了
             if (isFactoryBean(beanName)) {
                 final FactoryBean<?> factory = (FactoryBean<?>) getBean(FACTORY_BEAN_PREFIX 
                     + beanName);
@@ -2370,7 +2539,7 @@ try {
 ```
 
 initializeBean:
-
+也就是说实例出来以后，且属性给了以后才会调用aware接口
 ```java
 protected Object initializeBean(final String beanName, final Object bean, RootBeanDefinition mbd) {
     if (System.getSecurityManager() != null) {

@@ -85,6 +85,8 @@ public BeanDefinition parse(Element element, ParserContext parserContext) {
 下面分部分进行说明。
 
 ##  TransactionalEventListener
+TransactionalEventListenerFactory这个在annotation-driven标签那里会注册这个类
+
 
 第一部分用于向Spring容器注册TransactionalEventListener工厂，TransactionalEventListener是Spring4.2引入的新特性，允许我们自定义监听器监听事务的提交或其它动作。
 

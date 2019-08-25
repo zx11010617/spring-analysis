@@ -132,6 +132,15 @@ public BeanDefinition parse(Element element, ParserContext parserContext) {
 解析的过程主要分为以下几个部分。
 
 ### proxy-target-class & expose-proxy
+proxy-target-class配了true会执行如下逻辑
+org.springframework.aop.config.internalAutoProxyCreator，这个类是创建代理的类。里面的属性proxyTargetClass确定是不是用cglib去代理类
+```java
+if (registry.containsBeanDefinition("org.springframework.aop.config.internalAutoProxyCreator")) {
+            BeanDefinition definition = registry.getBeanDefinition("org.springframework.aop.config.internalAutoProxyCreator");
+            definition.getPropertyValues().add("proxyTargetClass", Boolean.TRUE);
+        }
+```        
+        
 
 对应着aop:config的两个属性，前者代表是否为被代理这生成CGLIB子类，默认false，只为接口生成代理子类(话说如果不生成子类那么怎么拦截?)。后者代表是否将代理bean暴露给用户，如果暴露，可以通过Spring AopContext类获得，默认不暴露。
 
@@ -139,6 +148,7 @@ public BeanDefinition parse(Element element, ParserContext parserContext) {
 
 ### aop:pointcut
 
+// pointcut解析对应的BeanDefination是 prototype的
 pointcut的解析是一个生成一个BeanDefinition并将其id, expression等属性保存在BeanDefinition中。注意以下几点:
 
 - BeanDefinition的ID来自于id属性，如果没有，那么自动生成。

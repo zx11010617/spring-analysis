@@ -171,7 +171,7 @@ private BeanDefinitionParser findParserForElement(Element element, ParserContext
 localName是个什么东西呢，比如对于context:annotation-config标签就是annotation-config。
 
 # annotation-config
-
+annotationConfig这个变量决定了要不要注册后处理类。
 AnnotationConfigBeanDefinitionParser.parse:
 
 ```java
@@ -237,12 +237,14 @@ public static Set<BeanDefinitionHolder> registerAnnotationConfigProcessors(
     }
 
     if (!registry.containsBeanDefinition(AUTOWIRED_ANNOTATION_PROCESSOR_BEAN_NAME)) {
+        // 处理@Autowaire
         RootBeanDefinition def = new RootBeanDefinition(AutowiredAnnotationBeanPostProcessor.class);
         def.setSource(source);
         beanDefs.add(registerPostProcessor(registry, def, AUTOWIRED_ANNOTATION_PROCESSOR_BEAN_NAME));
     }
 
     if (!registry.containsBeanDefinition(REQUIRED_ANNOTATION_PROCESSOR_BEAN_NAME)) {
+        // 处理@Required
         RootBeanDefinition def = new RootBeanDefinition(RequiredAnnotationBeanPostProcessor.class);
         def.setSource(source);
         beanDefs.add(registerPostProcessor(registry, def, REQUIRED_ANNOTATION_PROCESSOR_BEAN_NAME));
@@ -250,6 +252,7 @@ public static Set<BeanDefinitionHolder> registerAnnotationConfigProcessors(
 
     // Check for JSR-250 support, and if present add the CommonAnnotationBeanPostProcessor.
     if (jsr250Present && !registry.containsBeanDefinition(COMMON_ANNOTATION_PROCESSOR_BEAN_NAME)) {
+        // 处理@Resource @PreDestroy等
         RootBeanDefinition def = new RootBeanDefinition(CommonAnnotationBeanPostProcessor.class);
         def.setSource(source);
         beanDefs.add(registerPostProcessor(registry, def, COMMON_ANNOTATION_PROCESSOR_BEAN_NAME));
@@ -265,11 +268,13 @@ public static Set<BeanDefinitionHolder> registerAnnotationConfigProcessors(
     }
 
     if (!registry.containsBeanDefinition(EVENT_LISTENER_PROCESSOR_BEAN_NAME)) {
+        // 处理@EventListener
         RootBeanDefinition def = new RootBeanDefinition(EventListenerMethodProcessor.class);
         def.setSource(source);
         beanDefs.add(registerPostProcessor(registry, def, EVENT_LISTENER_PROCESSOR_BEAN_NAME));
     }
     if (!registry.containsBeanDefinition(EVENT_LISTENER_FACTORY_BEAN_NAME)) {
+        // 处理@EventListenerFactory
         RootBeanDefinition def = new RootBeanDefinition(DefaultEventListenerFactory.class);
         def.setSource(source);
         beanDefs.add(registerPostProcessor(registry, def, EVENT_LISTENER_FACTORY_BEAN_NAME));
@@ -498,7 +503,37 @@ public static void main(String[] args) {
 ##### 类解析
 总的而言，这一步还是把解析的信息放入了configclass里面
 
+    1. 先获取所有的bean String[] candidateNames = registry.getBeanDefinitionNames();
+    
+    2. 找出通过校验的ConfigurationClassUtils.checkConfigurationClassCandidate(beanDef, this.metadataReaderFactory)  bean作为candidate。@Configuration @Bean @Component的bean是ok，可以通过的
+        0 = "org.springframework.context.annotation.Import"
+        1 = "org.springframework.stereotype.Component"
+        2 = "org.springframework.context.annotation.ImportResource"
+        3 = "org.springframework.context.annotation.ComponentScan"
+        上面4个可以通过isLiteConfigurationCandidate()校验。
+        而spring内部的bean，一般是不会通过的
+    
+    3.调用parse.parse()方法，对上面找出来的Beandefination进行parse()。parser是ConfigurationClassParser
+    
+    4.里面会调用到重要方法doProcessConfigurationClass()
+        按照 memberclass(内部类),如果是Configurationclass会递归调用doProcessConfigurationClass()
+            @PropertySource， 注意这里的解析结果会添加入environment里面去
+            @ComponentScans， @ComponentScan  作用是进行包扫描，添加beandefination
+            @Import     主要作用是让调用@Import的Bean在此时调用被调用类的Aware方法
+            @ImportResource 把对应的source添加进这个configclass里面 
+            @Bean           添加进configclass的beanmethod属性中去
+            interface       interface属性同@Bean添加进beanmethod属性中去
+            
+    5.会调用到ConfigurationClassBeanDefinitionReader.loadBeanDefinitionsForConfigurationClass() 方法，处理@ean
+        这里会用Configclass注册一个BeanDefination，但里面的FactoryBeanName会写成configclass的beanname,factorymethod会写成对应的方法名
+            ConfigurationClassBeanDefinition beanDef = new ConfigurationClassBeanDefinition(configClass, metadata);
+			beanDef.setFactoryBeanName(configClass.getBeanName());
+			beanDef.setUniqueFactoryMethodName(methodName);
+	    后面对这个beanmethod进一步解析了放入beandefination中，最后注册到beanfactory中。
+	    
+
    a. 这里便是对标注了@Configuration注解的类及进行解析，通过调用ConfigurationClassPostProcessor的processConfigBeanDefinitions方法来实现，具体怎么解析就不详细说明了。
+   
     会依次解析类上的@PropertySource -> 加载文件对应的property，会把文件位置作为key。形成PropertySource对象，文件kv成为它的properties属性。这个对象 envrioment的属性propertysources里面 ，文件名放入propertynames里面。
                     ConfigurationClassParser.addPropertySource方法。到这里还没有bean。属性也没进入beanDefination。
                   
@@ -1274,7 +1309,12 @@ protected ClassPathBeanDefinitionScanner configureScanner(ParserContext parserCo
 
 component-scan注解会默认扫描喜闻乐见的@Component、@Repository、@Service和@Controller四大金刚。如果此属性设为false，那么就不会扫描这几个属性。
 在ClassPathScanningCandidateComponentProvider.isCandidateComponent()方法中实现了。可以在方法registerDefaultFilters()里面看到默认支持的是Component，ManagedBean
+ScannedGenericBeanDefinition,这个是最后生成的BeanDefination，与RootBeanDefination不同。
 
+先扫描出@Component和@ManagedBean的作为condidates。这时的BeanDefination里面只是存了Metadata，beanname,scope等属性都还没有解析    
+然后AbstractBeanDefination.applyDefaults()方法会给一些默认属性
+然后，作为AnnotatedBeanDefinition,会调用postprocess方法，给一些metadata里面指定的属性，以及父类的属性
+@Configuration是AbstractBeanDefination，不会最后作为一个BeanDefination去实例化，而@Component是的
 ### 扫描器:创建 & 初始化
 
 就是createScanner方法和下面那一坨setter方法，没啥好说的。
@@ -2060,6 +2100,7 @@ load-time-weaver用以开启aspectj类加载期织入，实际上是利用jdk1.6
 可以参考:
 
 [Spring之LoadTimeWeaver——一个需求引发的思考](http://sexycoding.iteye.com/blog/1062372)
+在Java 语言中，从织入切面的方式上来看，存在三种织入方式：编译期织入、类加载期织入和运行期织入。编译期织入是指在Java编译期，采用特殊的编译器，将切面织入到Java类中；而类加载期织入则指通过特殊的类加载器，在类字节码加载到JVM时，织入切面；运行期织入则是采用CGLib工具或JDK动态代理进行切面的织入
 
 [Spring LoadTimeWeaver 的那些事儿](http://www.iteye.com/topic/481813)
 
